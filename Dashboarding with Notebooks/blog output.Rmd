@@ -1,0 +1,224 @@
+---
+title: 'MTA Shutdown Analysis'
+description: |
+  An automated notebook built to investigate structural patterns resulting from New York City & State transportation policy.
+author:
+  - name: Jason Bixon 
+    url: https://jbixon13.wixsite.wix.com/website
+date: "`r Sys.Date()`"
+output: radix::radix_article
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r message=FALSE, echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(leaflet)
+library(forecast)
+library(scales)
+```
+
+```{r message=FALSE, echo=FALSE}
+# read in datasets 
+NYCHA <- read_csv('nycha-resident-data-book-summary.csv')                                                                # NYC Housing Authority data 
+MTA_bt <- read_csv('hourly-traffic-on-metropolitan-transportation-authority-mta-bridges-and-tunnels-beginning-2010.csv') # MTA bridges & tunnels data
+MTA_fares <- read_csv('fare-card-history-for-metropolitan-transportation-authority-mta-beginning-2010.csv')              # MTA subway fare data  
+MTA_KPI <- read_csv('metropolitan-transportation-authority-mta-performance-indicators-per-agency-beginning-2008.csv')    # MTA KPI performance data 
+NYPD <- read_csv('nypd-motor-vehicle-collisions.csv', col_types = list(DATE = col_character()))                          # NYPD collision data 
+```
+
+
+I was inspired by this [CityLab](https://www.citylab.com/perspective/2018/12/new-york-city-electric-bikes-transit-crisis-de-blasio/577969/) article detailing the impending transportation crisis due to the MTA L Line shutdown. Specifically, I am interested in observing whether the shutdown contributes to an increase in cyclist injuries due to motor vehicle collisions as about [275,000 L Line riders](https://ny.curbed.com/2018/10/3/17925038/nyc-subway-l-train-shutdown-mitigation-alternatives) seek alternatives.  
+  
+[NYC DOT](http://web.mta.info/sandy/CanarsieTunnelRebuildingProcess.html#sdtr) has predicted about 2% of L Line riders to switch to cycling, while about 79% are predicted to move to other subway lines. I could investigate the dispersion of L Train riders to other options as a whole if data is available, but for now I will focus on cyclist safety as it's more approachable with currently available data.  
+
+Let's start by looking at some performance metrics for the MTA subway network as a whole.  
+
+```{r echo=FALSE}
+# convert Period to date variable
+transit <- MTA_KPI
+
+transit$Period <- paste(transit$Period, '-01', sep = '')
+
+transit$Period <- transit$Period %>%
+  ymd()
+
+ # filter observations to only NYC Transit (Subway and Bus)
+transit <- transit %>% 
+  dplyr::filter(MTA_KPI$`Agency Name` == 'NYC Transit') %>%
+  group_by(Period) 
+```
+
+```{r echo=FALSE, message=FALSE}
+# plot ridership 
+plt.NYC.riders <- transit %>% 
+  dplyr::filter(`Indicator Name` == 'Total Ridership - Subways') %>%
+  ggplot(aes(x = Period, y = `Monthly Actual`)) + 
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method = 'lm') + 
+  ylab('Total Monthly Ridership') +
+  scale_y_continuous(labels = comma) +
+  theme_classic()
+
+# convert to plotly object
+ggplotly(plt.NYC.riders) %>% 
+  layout(title = 'Total Monthly Ridership - NYC Transit (All Lines)',
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+
+```
+
+```{r echo=FALSE, message=FALSE}
+# plot On-Time Performance for all subway lines
+plt.NYC.OTP <- transit %>% 
+  dplyr::filter(`Indicator Name` == 'On-Time Performance (Terminal)') %>%
+  ggplot(aes(x = Period, y = `Monthly Actual`)) + 
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method = 'lm') + 
+  ylab('Monthly On-Time Performance') +
+  theme_classic()
+
+# convert to plotly object
+ggplotly(plt.NYC.OTP) %>% 
+  layout(title = 'On-Time Performance - NYC Transit (All Lines)',
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+```
+
+```{r echo=FALSE, message=FALSE}
+# plot subway wait assessment for all subway lines
+plt.NYC.SWA <- transit %>% 
+  dplyr::filter(`Indicator Name` == 'Subway Wait Assessment') %>%
+  ggplot(aes(x = Period, y = `Monthly Actual`)) + 
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method = 'lm') +
+  ylab('Subway Wait Assessment') +
+  theme_classic()
+
+# convert to plotly object
+ggplotly(plt.NYC.SWA) %>% 
+  layout(title = 'Subway Wait Assessment - NYC Transit (All Lines)',
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+
+```
+
+```{r echo=FALSE, message=FALSE}
+# plot mean distance between failures for all subway lines 
+plt.NYC.fail <- transit %>% 
+  dplyr::filter(`Indicator Name` == 'Mean Distance Between Failures - Subways') %>%
+  ggplot(aes(x = Period, y = `Monthly Actual`)) + 
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method = 'lm') +
+  ylab('Mean Distance Between Failures') +
+  scale_y_continuous(labels = comma) +
+  theme_classic()
+
+# convert to plotly object
+ggplotly(plt.NYC.fail) %>% 
+  layout(title = 'Mean Distance Between Failures - NYC Transit (All Lines)',
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+
+```
+
+Next, the L Line specifically: 
+
+```{r echo=FALSE, message=FALSE}
+# plot On-Time Performance for the L Line 
+plt.L.OTP <- transit %>% 
+  dplyr::filter(`Indicator Name` == 'OTP (Terminal) - L Line') %>% 
+  ggplot(aes(x = Period, y = `Monthly Actual`)) + 
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method = 'lm') +
+  ylab('Monthly On-Time Performance') + 
+  theme_classic()  
+
+# convert to plotly object
+ggplotly(plt.L.OTP) %>% 
+  layout(title = 'L Line On-Time Performance has decreased, but is relatively high', 
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+
+```
+
+Now let's look at some two-wheeled data.
+<br>
+
+```{r echo=FALSE}
+# convert date to a date variable
+NYPD$DATE <- NYPD$DATE %>% 
+  substr(start = 1, stop = 10) %>% 
+  ymd()
+
+# create summarized subset of NYPD data 
+sub <- NYPD 
+
+# summarize by week
+sub <- sub %>% 
+  filter(DATE > 16438) %>% 
+  mutate(week = floor_date(DATE, 'weeks', week_start = 7)) %>% 
+  group_by(week) %>% 
+  summarize(cyclist_injuries = sum(`NUMBER OF CYCLIST INJURED`))
+
+```
+
+```{r echo=FALSE, message=FALSE}
+# plot cyclist injuries per week 
+plt.sub <- sub %>% 
+  ggplot(aes(x = week, y = cyclist_injuries)) +
+  geom_point(color = 'steelblue4', alpha = .7) + 
+  geom_smooth(method='lm') + 
+  xlab('Week') +
+  ylab('Cyclist Injuries') + 
+  theme_classic()
+
+# convert to plotly object
+ggplotly(plt.sub) %>% 
+  layout(title = 'Weekly Cyclist Injuries Resulting from Motor Vehicle Collisions',
+  titlefont = list(size = 17)) %>% 
+  config(displayModeBar = FALSE)
+```
+
+```{r}
+# convert weekly crash data to a time-series object
+ts_injuries <- ts(sub$cyclist_injuries, frequency = 52)
+# plot autocorrelation function
+acf(ts_injuries)
+```
+
+```{r echo=FALSE}
+arima1 <- auto.arima(ts_injuries, stepwise = FALSE, trace = FALSE)
+summary(arima1)
+```
+
+
+Planned Updates:  
+lines of questioning - EDA  
+how many riders of L train  
+how many cyclists  
+how many bus riders  
+refer to article predictions of where capacity will move to   
+present general transit trends maybe  
+show map of cyclist accidents?  
+show time-series trends of accidents  
+conclude with whether L train has increased accidents  
+leaflet timeline is difficult at best, consider gganimate  
+gganimate issues installing with R 3.5.1  
+ARIMA and intervention analysis/Interrupted Time Series Analysis    
+consider using citibike data as a proxy for bike usage   
+
+***
+
+Radix is a publication format for scientific and technical writing, native to the web. 
+
+Learn more about using Radix at <https://rstudio.github.io/radix>.
+
+
+
+
+
